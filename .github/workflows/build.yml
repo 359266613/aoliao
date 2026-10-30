@@ -64,6 +64,47 @@ jobs:
         path: theos-roothide
         submodules: recursive
 
+    - name: Suppress vendored Theos/Orion build warnings
+      run: |
+        set -euo pipefail
+        ORION_DIR="$THEOS/vendor/orion"
+        # 给 Orion 所有 SwiftPM target 注入 -suppress-warnings，并移除 manifest 里的 #warning
+        # （这些警告来自 theos 子模块 theos/Orion，不在本仓库内，只能在 CI 拉取后打补丁抑制）
+        python3 - "$ORION_DIR" <<'PY' || true
+        import os, re, sys
+        flag = '.unsafeFlags(["-suppress-warnings"])'
+        for name in ("Package.swift", "Package@swift-5.6.swift"):
+            p = os.path.join(sys.argv[1], name)
+            if not os.path.isfile(p):
+                continue
+            s = open(p, encoding="utf-8").read()
+            def repl(m):
+                if "swiftSettings" in m.group(2):
+                    return m.group(0)
+                return ".%s(%s, swiftSettings: [%s])" % (m.group(1), m.group(2), flag)
+            s2 = re.sub(r'\.(target|testTarget|executableTarget)\((.*?)\)', repl, s, flags=re.S)
+            s2 = re.sub(r'#warning\(.*?\)', '', s2, flags=re.S)
+            if s2 != s:
+                open(p, "w", encoding="utf-8").write(s2)
+                print("patched", name)
+        PY
+        # 用包装脚本让 `swift build` 额外带上 -Xswiftc -suppress-warnings，
+        # 以抑制依赖包（swift-syntax / swift-argument-parser）的警告
+        REAL_SWIFT="$(xcrun -f swift)"
+        WRAP_DIR="$RUNNER_TEMP/swift-wrap"
+        mkdir -p "$WRAP_DIR"
+        cat > "$WRAP_DIR/swift" <<SWIFT
+        #!/bin/sh
+        REAL='$REAL_SWIFT'
+        if [ "\$1" = "build" ]; then
+          shift
+          exec "\$REAL" build -Xswiftc -suppress-warnings "\$@"
+        fi
+        exec "\$REAL" "\$@"
+        SWIFT
+        chmod +x "$WRAP_DIR/swift"
+        echo "$WRAP_DIR" >> "$GITHUB_PATH"
+
     - name: Install iOS SDK (iPhoneOS16.5)
       run: |
         set -euo pipefail
