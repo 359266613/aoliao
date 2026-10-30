@@ -73,17 +73,52 @@ jobs:
         python3 - "$ORION_DIR" <<'PY' || true
         import os, re, sys
         flag = '.unsafeFlags(["-suppress-warnings"])'
+        kinds = ('target', 'testTarget', 'executableTarget')
+        def process(s):
+            # 收集所有 .target/.testTarget/.executableTarget( 的起始位置
+            positions = []
+            for kind in kinds:
+                for m in re.finditer(r'\.' + re.escape(kind) + r'\(', s):
+                    positions.append((m.start(), kind))
+            positions.sort()
+            out = []
+            cursor = 0
+            n = len(s)
+            for start, kind in positions:
+                if start < cursor:
+                    continue
+                paren = start + 1 + len(kind)   # '(' 的位置
+                depth = 0
+                k = paren
+                # 括号配对，找到与起始 '(' 匹配的 ')'
+                while k < n:
+                    c = s[k]
+                    if c == '(':
+                        depth += 1
+                    elif c == ')':
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    k += 1
+                body = s[paren + 1:k]
+                if 'swiftSettings' in body:
+                    continue  # 已有该参数，保持原样
+                b = body.rstrip()
+                if b.endswith(','):
+                    b = b[:-1]
+                new_call = '.' + kind + '(' + b + ', swiftSettings: [' + flag + '])'
+                out.append(s[cursor:start])
+                out.append(new_call)
+                cursor = k + 1
+            out.append(s[cursor:])
+            return ''.join(out)
         for name in ("Package.swift", "Package@swift-5.6.swift"):
             p = os.path.join(sys.argv[1], name)
             if not os.path.isfile(p):
                 continue
             s = open(p, encoding="utf-8").read()
-            def repl(m):
-                if "swiftSettings" in m.group(2):
-                    return m.group(0)
-                return ".%s(%s, swiftSettings: [%s])" % (m.group(1), m.group(2), flag)
-            s2 = re.sub(r'\.(target|testTarget|executableTarget)\((.*?)\)', repl, s, flags=re.S)
-            s2 = re.sub(r'#warning\(.*?\)', '', s2, flags=re.S)
+            s2 = process(s)
+            s2 = re.sub(r'#warning\(.*?\)', '', s2, flags=re.S)  # 去掉 manifest 的 #warning
             if s2 != s:
                 open(p, "w", encoding="utf-8").write(s2)
                 print("patched", name)
