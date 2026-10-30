@@ -72,10 +72,49 @@ jobs:
         # （这些警告来自 theos 子模块 theos/Orion，不在本仓库内，只能在 CI 拉取后打补丁抑制）
         python3 - "$ORION_DIR" <<'PY' || true
         import os, re, sys
-        flag = '.unsafeFlags(["-suppress-warnings"])'
+        FLAG = 'swiftSettings: [.unsafeFlags(["-suppress-warnings"])]'
         kinds = ('target', 'testTarget', 'executableTarget')
+
+        def split_top(body):
+            # 按顶层逗号切分参数（忽略括号/方括号/字符串内部的逗号）
+            args = []
+            cur = []
+            depth = 0
+            q = None
+            i = 0
+            n = len(body)
+            while i < n:
+                c = body[i]
+                if q:
+                    cur.append(c)
+                    if c == q:
+                        q = None
+                    i += 1
+                    continue
+                if c == '"' or c == "'":
+                    q = c
+                    cur.append(c)
+                elif c in '([{':
+                    depth += 1
+                    cur.append(c)
+                elif c in ')]}':
+                    depth -= 1
+                    cur.append(c)
+                elif c == ',' and depth == 0:
+                    args.append(''.join(cur))
+                    cur = []
+                else:
+                    cur.append(c)
+                i += 1
+            tail = ''.join(cur)
+            if tail.strip():
+                args.append(tail)
+            return args
+
+        def label_of(a):
+            return a.strip().split(':', 1)[0].strip()
+
         def process(s):
-            # 收集所有 .target/.testTarget/.executableTarget( 的起始位置
             positions = []
             for kind in kinds:
                 for m in re.finditer(r'\.' + re.escape(kind) + r'\(', s):
@@ -87,10 +126,9 @@ jobs:
             for start, kind in positions:
                 if start < cursor:
                     continue
-                paren = start + 1 + len(kind)   # '(' 的位置
+                paren = start + 1 + len(kind)
                 depth = 0
                 k = paren
-                # 括号配对，找到与起始 '(' 匹配的 ')'
                 while k < n:
                     c = s[k]
                     if c == '(':
@@ -102,23 +140,30 @@ jobs:
                     k += 1
                 body = s[paren + 1:k]
                 if 'swiftSettings' in body:
-                    continue  # 已有该参数，保持原样
-                b = body.rstrip()
-                if b.endswith(','):
-                    b = b[:-1]
-                new_call = '.' + kind + '(' + b + ', swiftSettings: [' + flag + '])'
+                    continue
+                args = split_top(body)
+                labels = [label_of(a) for a in args]
+                insert_at = len(args)
+                for idx, lab in enumerate(labels):
+                    # swiftSettings 必须位于 linkerSettings / plugins 之前
+                    if lab in ('linkerSettings', 'plugins'):
+                        insert_at = idx
+                        break
+                args.insert(insert_at, ' ' + FLAG)
+                new_call = '.' + kind + '(' + ','.join(args) + ')'
                 out.append(s[cursor:start])
                 out.append(new_call)
                 cursor = k + 1
             out.append(s[cursor:])
             return ''.join(out)
+
         for name in ("Package.swift", "Package@swift-5.6.swift"):
             p = os.path.join(sys.argv[1], name)
             if not os.path.isfile(p):
                 continue
             s = open(p, encoding="utf-8").read()
             s2 = process(s)
-            s2 = re.sub(r'#warning\(.*?\)', '', s2, flags=re.S)  # 去掉 manifest 的 #warning
+            s2 = re.sub(r'#warning\(.*?\)', '', s2, flags=re.S)
             if s2 != s:
                 open(p, "w", encoding="utf-8").write(s2)
                 print("patched", name)
